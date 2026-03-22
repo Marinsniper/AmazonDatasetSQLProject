@@ -1,0 +1,419 @@
+-- SELECT*
+-- FROM `amazonproject-490814.amazon.amazon` 
+-- LIMIT 1000
+
+-- --행 수 확인:
+-- SELECT COUNT(*) AS row_cnt
+-- FROM `amazonproject-490814.amazon.amazon`;
+
+-- --중복 상품 확인:
+-- SELECT
+--   COUNT(*) AS total_rows,
+--   COUNT(DISTINCT product_id) AS unique_products,
+--   COUNT(*) - COUNT(DISTINCT product_id) AS duplicate_rows
+-- FROM `amazonproject-490814.amazon.amazon`;
+
+-- --data type 확인
+-- SELECT column_name, data_type
+-- FROM `amazonproject-490814.amazon.INFORMATION_SCHEMA.COLUMNS`
+-- WHERE table_name = 'amazon';
+
+-- -- --결측 확인:
+-- SELECT
+--   SUM(CASE WHEN rating_count IS NULL THEN 1 ELSE 0 END) AS null_rating_count,
+--   SUM(CASE WHEN rating IS NULL OR rating = '' THEN 1 ELSE 0 END) AS null_rating,
+--   SUM(CASE WHEN product_id IS NULL OR product_id = '' THEN 1 ELSE 0 END) AS null_product_id
+-- FROM `amazonproject-490814.amazon.amazon`;
+
+-- --정제테이블 생성(amazon clean)
+-- CREATE OR REPLACE TABLE `amazonproject-490814.amazon.amazon_clean` AS
+-- WITH base AS (
+--   SELECT
+--     product_id,
+--     product_name,
+--     category,
+--     discounted_price,
+--     actual_price,
+--     discount_percentage,
+--     NULLIF(CAST(rating AS STRING), '|') AS rating_raw,
+--     rating_count,
+--     about_product,
+--     user_id,
+--     user_name,
+--     review_id,
+--     review_title,
+--     review_content,
+--     img_link,
+--     product_link
+--   FROM `amazonproject-490814.amazon.amazon`
+-- ),
+
+-- typed AS (
+--   SELECT
+--     product_id,
+--     product_name,
+--     category,
+
+--     SAFE_CAST(REGEXP_REPLACE(CAST(discounted_price AS STRING), r'[^0-9.]', '') AS FLOAT64) AS discounted_price_num,
+--     SAFE_CAST(REGEXP_REPLACE(CAST(actual_price AS STRING), r'[^0-9.]', '') AS FLOAT64) AS actual_price_num,
+--     SAFE_CAST(REGEXP_REPLACE(CAST(discount_percentage AS STRING), r'[^0-9.]', '') AS FLOAT64) / 100 AS discount_pct_num,
+--     SAFE_CAST(rating_raw AS FLOAT64) AS rating_num,
+--     SAFE_CAST(REGEXP_REPLACE(CAST(rating_count AS STRING), r'[^0-9]', '') AS INT64) AS rating_count_num,
+
+--     about_product,
+--     user_id,
+--     user_name,
+--     review_id,
+--     review_title,
+--     review_content,
+--     img_link,
+--     product_link
+--   FROM base
+-- ),
+
+-- dedup AS (
+--   SELECT * EXCEPT(rn)
+--   FROM (
+--     SELECT
+--       *,
+--       ROW_NUMBER() OVER (
+--         PARTITION BY product_id
+--         ORDER BY rating_count_num DESC NULLS LAST,
+--                  rating_num DESC NULLS LAST,
+--                  actual_price_num DESC NULLS LAST
+--       ) AS rn
+--     FROM typed
+--   )
+--   WHERE rn = 1
+-- )
+
+-- SELECT
+--   product_id,
+--   product_name,
+--   category,
+
+--   discounted_price_num,
+--   actual_price_num,
+--   discount_pct_num,
+--   rating_num,
+--   rating_count_num,
+
+--   actual_price_num - discounted_price_num AS discount_amount,
+--   SAFE_DIVIDE(actual_price_num - discounted_price_num, actual_price_num) AS discount_rate_calc,
+
+--   about_product,
+--   img_link,
+--   product_link,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(category AS STRING), '|')) AS x
+--   ) AS category_array,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(user_id AS STRING), ',')) AS x
+--   ) AS user_id_array,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(user_name AS STRING), ',')) AS x
+--   ) AS user_name_array,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(review_id AS STRING), ',')) AS x
+--   ) AS review_id_array,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(review_title AS STRING), ',')) AS x
+--   ) AS review_title_array,
+
+--   ARRAY(
+--     SELECT TRIM(x)
+--     FROM UNNEST(SPLIT(CAST(review_content AS STRING), ',')) AS x
+--   ) AS review_content_array
+
+-- FROM dedup
+-- WHERE product_id IS NOT NULL;
+
+-- -- --정제테이블 검증
+-- SELECT *
+-- FROM `amazonproject-490814.amazon.amazon_clean`
+-- LIMIT 10;
+
+-- SELECT
+--   COUNT(*) AS final_rows,
+--   COUNT(DISTINCT product_id) AS final_unique_products
+-- FROM `amazonproject-490814.amazon.amazon_clean`;
+
+-- SELECT
+--   MIN(rating_num) AS min_rating,
+--   MAX(rating_num) AS max_rating,
+--   MIN(discount_pct_num) AS min_discount_pct,
+--   MAX(discount_pct_num) AS max_discount_pct
+-- FROM `amazonproject-490814.amazon.amazon_clean`;
+
+--원본 데이터에는 중복 상품, 문자열 형태의 가격/할인율, 비정상 평점값이 존재했기 때문에 분석 전에 정제 테이블을 생성하였다.
+--가격과 할인율은 수치형으로 변환하고, 평점 이상값은 NULL 처리했으며, 상품 중복은 리뷰 수와 평점을 기준으로 대표 행 1건만 남겼다.
+
+-- --리뷰 단위 분석용 뷰 만들기
+-- CREATE OR REPLACE VIEW `amazonproject-490814.amazon.amazon_review_flat` AS
+-- SELECT
+--   c.product_id,
+--   c.product_name,
+--   c.category,
+--   c.discounted_price_num,
+--   c.actual_price_num,
+--   c.discount_pct_num,
+--   c.rating_num,
+--   c.rating_count_num,
+
+--   c.user_id_array[SAFE_OFFSET(i)] AS user_id,
+--   c.user_name_array[SAFE_OFFSET(i)] AS user_name,
+--   c.review_id_array[SAFE_OFFSET(i)] AS review_id,
+--   c.review_title_array[SAFE_OFFSET(i)] AS review_title,
+--   c.review_content_array[SAFE_OFFSET(i)] AS review_content
+-- FROM `amazonproject-490814.amazon.amazon_clean` c,
+-- UNNEST(GENERATE_ARRAY(0, ARRAY_LENGTH(c.review_id_array) - 1)) AS i;
+
+-- --확인
+-- SELECT *
+-- FROM `amazonproject-490814.amazon.amazon_review_flat` 
+-- LIMIT 20;
+
+-- --추천시스템 설계 1:신뢰도 기반 인기 추천
+-- --추천시스템 이름 : 많이 팔리고 만족도도 검증된 상품
+-- --추천 시스템의 테마 : 단순히 리뷰 수만 많은 상품이 아니라, 평점과 리뷰 수를 함께 고려한 신뢰도 높은 인기 상품을 추천한다. 평점이 높아도 리뷰 수가 적으면 우연일 수 있고, 리뷰 수가 많아도 평점이 낮으면 만족도가 낮다. 따라서 두 요소를 함께 반영한 가중 평점(Weighted Rating) 방식이 적합
+-- --구현 로직: R: 상품 평점, v: 상품 리뷰 수, C: 전체 평균 평점, m: 최소 신뢰 리뷰 수 기준
+-- --결과 설명: 이 추천은 리뷰 수가 많은 상품에 더 높은 신뢰를 부여한다. 따라서 단순 고평점 상품보다 실제 사용자 만족도가 안정적으로 검증된 제품을 우선 추천하는 데 적합
+-- WITH stats AS (
+--   SELECT
+--     AVG(rating_num) AS C,
+--     APPROX_QUANTILES(rating_count_num, 100)[OFFSET(80)] AS m
+--   FROM `amazonproject-490814.amazon.amazon_clean`
+--   WHERE rating_num IS NOT NULL
+--     AND rating_count_num IS NOT NULL
+-- ),
+-- scored AS (
+--   SELECT
+--     a.product_id,
+--     a.product_name,
+--     a.category,
+--     a.rating_num,
+--     a.rating_count_num,
+--     a.discounted_price_num,
+--     ((a.rating_count_num / (a.rating_count_num + s.m)) * a.rating_num) +
+--     ((s.m / (a.rating_count_num + s.m)) * s.C) AS weighted_score
+--   FROM `amazonproject-490814.amazon.amazon_clean`a
+--   CROSS JOIN stats s
+--   WHERE a.rating_num IS NOT NULL
+--     AND a.rating_count_num IS NOT NULL
+-- )
+-- SELECT *
+-- FROM scored
+-- ORDER BY weighted_score DESC, rating_count_num DESC
+-- LIMIT 20;
+
+-- --추천 시스템 2. 할인 + 평점 결합 가성비 추천
+-- --추천 시스템 이름: 할인도 크고 평도 좋은 가성비 상품
+-- --추천 시스템의 테마: 가격 민감도가 높은 고객에게 할인율이 높으면서도 평점과 리뷰 수가 충분한 상품을 추천한다. 단순 할인율만 보면 품질이 낮은 상품이 섞일 수 있으므로 평점과 리뷰 수를 함께 반영한다.
+-- --구현 로직: 할인율 높을수록 가점, 평점 높을수록 가점, 리뷰 수 많을수록 신뢰도 보정, 로그를 써서 리뷰 수의 과도한 영향 완화
+-- --높은 할인율만으로 추천하지 않고, 실제 사용자 만족도와 리뷰 규모까지 반영하여 ‘싸지만 실패 확률이 낮은 상품’을 찾는 데 초점을 맞춤
+-- SELECT
+--   product_id,
+--   product_name,
+--   category,
+--   discounted_price_num,
+--   actual_price_num,
+--   discount_pct_num,
+--   rating_num,
+--   rating_count_num,
+--   discount_pct_num * rating_num * LOG10(rating_count_num + 1) AS value_score
+-- FROM `amazonproject-490814.amazon.amazon_clean`
+-- WHERE discount_pct_num IS NOT NULL
+--   AND rating_num IS NOT NULL
+--   AND rating_count_num IS NOT NULL
+--   AND rating_count_num >= 50
+-- ORDER BY value_score DESC
+-- LIMIT 20;
+
+-- --추천 시스템 3. 카테고리별 대표 상품 추천
+-- --추천 시스템 이름: 카테고리별 베스트 대표 상품
+-- --추천 시스템의 테마: 전체 인기 상품만 보여주면 특정 카테고리에 편중될 수 있다. 그래서 각 세부 카테고리마다 대표 상품 1~3개를 추천한다. 이 추천은 사용자가 특정 카테고리를 탐색할 때 유용
+-- --구현 로직: category를 | 기준으로 분리, 가장 마지막 카테고리를 세부 카테고리(leaf category)로 사용, 카테고리별로 weighted score 상위 상품 추출
+-- --전체 데이터에서 상위 상품만 추리면 케이블류처럼 리뷰 수가 많은 일부 품목이 과대대표될 수 있다. 따라서 세부 카테고리별 대표 상품을 제시해 탐색 경험을 개선한다.
+-- WITH base AS (
+--   SELECT
+--     product_id,
+--     product_name,
+--     category,
+--     category_array[SAFE_OFFSET(ARRAY_LENGTH(category_array) - 1)] AS leaf_category,
+--     rating_num,
+--     rating_count_num,
+--     discounted_price_num
+--   FROM `amazonproject-490814.amazon.amazon_clean`
+-- ),
+-- stats AS (
+--   SELECT
+--     AVG(rating_num) AS C,
+--     APPROX_QUANTILES(rating_count_num, 100)[OFFSET(70)] AS m
+--   FROM base
+--   WHERE rating_num IS NOT NULL
+--     AND rating_count_num IS NOT NULL
+-- ),
+-- scored AS (
+--   SELECT
+--     b.*,
+--     ((b.rating_count_num / (b.rating_count_num + s.m)) * b.rating_num) +
+--     ((s.m / (b.rating_count_num + s.m)) * s.C) AS weighted_score
+--   FROM base b
+--   CROSS JOIN stats s
+--   WHERE b.leaf_category IS NOT NULL
+--     AND b.rating_num IS NOT NULL
+--     AND b.rating_count_num IS NOT NULL
+-- ),
+-- ranked AS (
+--   SELECT
+--     *,
+--     ROW_NUMBER() OVER (
+--       PARTITION BY leaf_category
+--       ORDER BY weighted_score DESC, rating_count_num DESC
+--     ) AS rn
+--   FROM scored
+-- )
+-- SELECT
+--   leaf_category,
+--   product_id,
+--   product_name,
+--   rating_num,
+--   rating_count_num,
+--   weighted_score
+-- FROM ranked
+-- WHERE rn <= 3
+-- ORDER BY leaf_category, rn;
+
+-- --추천 시스템 4. 리뷰가 풍부한 검증형 추천
+-- --추천 시스템 이름: 후기가 풍부해서 안심하고 고를 수 있어요!
+-- --추천 시스템의 테마: 사용자 중에는 평점 숫자보다도 리뷰의 양과 설명의 풍부함을 중요하게 보는 경우가 있다. 이 추천은 텍스트 리뷰가 풍부한 상품을 추천한다.
+-- --구현 로직: 리뷰 개수, 리뷰 제목 길이, 리뷰 본문 길이, 평점, 리뷰 수 결합
+-- --이 추천은 단순 평점이 아니라, 실제로 많은 사용자가 리뷰를 남겼고 리뷰 내용도 충분히 긴 상품을 우선시한다. 구매 전 정보를 꼼꼼히 확인하려는 사용자에게 적합
+-- WITH review_stats AS (
+--   SELECT
+--     product_id,
+--     COUNT(DISTINCT review_id) AS review_cnt_flat,
+--     AVG(LENGTH(IFNULL(review_title, ''))) AS avg_title_len,
+--     AVG(LENGTH(IFNULL(review_content, ''))) AS avg_content_len
+--   FROM `amazonproject-490814.amazon.amazon_review_flat`
+--   GROUP BY product_id
+-- )
+-- SELECT
+--   a.product_id,
+--   a.product_name,
+--   a.rating_num,
+--   a.rating_count_num,
+--   r.review_cnt_flat,
+--   r.avg_title_len,
+--   r.avg_content_len,
+--   (a.rating_num * LOG10(a.rating_count_num + 1)) +
+--   (LOG10(r.review_cnt_flat + 1) * 0.5) +
+--   (r.avg_content_len / 1000) AS trust_review_score
+-- FROM `amazonproject-490814.amazon.amazon_clean` a
+-- JOIN review_stats r
+--   ON a.product_id = r.product_id
+-- WHERE a.rating_num IS NOT NULL
+--   AND a.rating_count_num IS NOT NULL
+-- ORDER BY trust_review_score DESC
+-- LIMIT 20;
+
+-- --추천 시스템 5. 유사 대체 상품 추천
+-- --추천 시스템 이름: 지금 보는 상품과 비슷한 더 나은 대안
+-- --추천 시스템의 테마: 특정 상품을 보고 있는 사용자에게 같은 세부 카테고리 안에서 가격대가 비슷한 대체 상품을 보여준다. 실무적으로 매우 추천 시스템다운 테마다. “이 상품 말고 비슷한데 더 평이 좋은 것 없을까?”를 해결한다.
+-- --구현 로직: 같은 leaf category, 가격 차이 ±20%, 자기 자신 제외, 평점/리뷰 수/할인율이 더 좋은 상품 우선
+-- --동일 카테고리와 유사 가격대 조건을 적용해, 사용자가 현재 고려 중인 상품과 직접 비교 가능한 대안을 제공한다. 이는 상세페이지 추천 영역에 적용하기 좋은 방식
+-- DECLARE seed_product_id STRING DEFAULT 'B07JW9H4J1';
+-- WITH seed AS (
+--   SELECT
+--     product_id,
+--     product_name,
+--     category_array[SAFE_OFFSET(ARRAY_LENGTH(category_array) - 1)] AS leaf_category,
+--     discounted_price_num,
+--     rating_num,
+--     rating_count_num
+--   FROM `amazonproject-490814.amazon.amazon_clean`
+--   WHERE product_id = seed_product_id
+-- ),
+-- candidates AS (
+--   SELECT
+--     a.product_id,
+--     a.product_name,
+--     a.category,
+--     a.discounted_price_num,
+--     a.rating_num,
+--     a.rating_count_num,
+--     a.discount_pct_num,
+--     ABS(a.discounted_price_num - s.discounted_price_num) / s.discounted_price_num AS price_gap_ratio
+--   FROM `amazonproject-490814.amazon.amazon_clean` a
+--   CROSS JOIN seed s
+--   WHERE a.product_id != s.product_id
+--     AND a.category_array[SAFE_OFFSET(ARRAY_LENGTH(a.category_array) - 1)] = s.leaf_category
+--     AND ABS(a.discounted_price_num - s.discounted_price_num) / s.discounted_price_num <= 0.2
+-- )
+-- SELECT
+--   product_id,
+--   product_name,
+--   discounted_price_num,
+--   rating_num,
+--   rating_count_num,
+--   discount_pct_num,
+--   price_gap_ratio,
+--   (rating_num * LOG10(rating_count_num + 1)) + (discount_pct_num * 2) - price_gap_ratio AS alt_score
+-- FROM candidates
+-- WHERE rating_num IS NOT NULL
+--   AND rating_count_num IS NOT NULL
+-- ORDER BY alt_score DESC
+-- LIMIT 10;
+
+-- --카테고리 분포
+-- SELECT
+--   cat AS category_value,
+--   COUNT(*) AS product_cnt
+-- FROM `amazonproject-490814.amazon.amazon_clean`,
+-- UNNEST(category_array) AS cat
+-- GROUP BY 1
+-- ORDER BY 2 DESC
+-- LIMIT 20;
+
+-- --가격대 분포
+-- SELECT
+--   CASE
+--     WHEN discounted_price_num < 200 THEN 'under_200'
+--     WHEN discounted_price_num < 500 THEN '200_499'
+--     WHEN discounted_price_num < 1000 THEN '500_999'
+--     ELSE '1000_plus'
+--   END AS price_band,
+--   COUNT(*) AS product_cnt
+-- FROM `amazonproject-490814.amazon.amazon_clean`
+-- GROUP BY 1
+-- ORDER BY 1;
+
+-- --평점 구간 분포
+-- SELECT
+--   FLOOR(rating_num * 2) / 2 AS rating_band,
+--   COUNT(*) AS product_cnt
+-- FROM `amazonproject-490814.amazon.amazon_clean`
+-- WHERE rating_num IS NOT NULL
+-- GROUP BY 1
+-- ORDER BY 1 DESC;
+
+--프로젝트 개요:
+--본 프로젝트는 Amazon 상품 데이터를 활용하여 SQL 기반 추천 시스템 5종을 설계하는 것을 목표로 하였다. 데이터셋은 상품 정보, 가격, 할인율, 평점, 리뷰 수, 카테고리, 리뷰 텍스트를 포함하고 있으며, 이를 활용해 인기 추천, 가성비 추천, 카테고리 대표 추천, 리뷰 검증형 추천, 유사 대체 상품 추천을 구현하였다.
+
+--데이터 전처리:
+--원본 데이터는 가격과 할인율이 문자열 형태로 저장되어 있었고, 일부 평점 이상값과 중복 상품이 존재하였다. 따라서 BigQuery에서 정제 테이블을 생성하여 가격/할인율/평점/리뷰 수를 수치형으로 변환하고, 상품 ID 기준 중복을 제거하였다. 또한 카테고리와 리뷰 관련 컬럼은 배열 형태로 분리하여 후속 분석이 가능하도록 가공하였다.
+
+--프로젝트 한계:
+--본 데이터셋은 구매 시계열이나 개별 사용자 행동 로그가 없기 때문에, 협업 필터링 기반 개인화 추천보다는 상품 메타데이터와 리뷰 신호를 활용한 SQL 기반 추천에 초점을 맞추었다.
+
+--결론: 본 프로젝트에서는 Amazon 상품 데이터를 활용하여 총 5가지 추천 시스템을 SQL로 구현하였다. 신뢰도 기반 인기 추천은 대중성이 높은 상품 탐색에 적합했고, 가성비 추천은 가격 민감 고객에게 유용했다. 카테고리 대표 추천은 탐색 편의성을 높였고, 리뷰 검증형 추천은 구매 불확실성을 줄이는 데 효과적이었다. 마지막으로 유사 대체 상품 추천은 상세페이지 수준에서 활용 가능한 실무형 추천으로 확장 가능성이 높았다. 향후에는 실제 클릭 로그, 장바구니 데이터, 구매 이력, 시간 정보가 추가된다면 개인화 추천과 협업 필터링으로 확장할 수 있을 것이다.
